@@ -1,0 +1,702 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  WorkshopVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.2.0.0/24
+      EnableDnsHostnames: 'true'
+      EnableDnsSupport: 'true'
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop'
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+        - Key: Name
+          Value: 'glueworkshop-igw'
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref WorkshopVPC
+    DependsOn: [InternetGateway, WorkshopVPC]
+  WorkshopSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs ''
+      CidrBlock: 10.2.0.0/26
+      VpcId: !Ref WorkshopVPC
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop-subnet1'
+    DependsOn: WorkshopVPC   
+  WorkshopSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select
+        - '1'
+        - !GetAZs ''
+      CidrBlock: 10.2.0.128/26
+      VpcId: !Ref WorkshopVPC
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop-subnet2'
+    DependsOn: WorkshopVPC
+  MyDBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Subnet available for the DB Instance
+      SubnetIds:
+        - !Ref WorkshopSubnet1
+        - !Ref WorkshopSubnet2
+    DependsOn: [WorkshopSubnet1, WorkshopSubnet2]
+  Route:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTable
+    DependsOn: [InternetGateway, RouteTable]
+  RouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop-routetable'
+      VpcId: !Ref WorkshopVPC
+    DependsOn: WorkshopVPC
+  SubnetRouteTableAssociation1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref WorkshopSubnet1
+    DependsOn: [WorkshopSubnet1, RouteTable]
+  SubnetRouteTableAssociation2:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref WorkshopSubnet2  
+    DependsOn: [WorkshopSubnet2, RouteTable]
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for DB instances.
+      SecurityGroupIngress:
+        - CidrIp: '0.0.0.0/0'
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+      VpcId: !Ref WorkshopVPC
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop-db-sg'
+    DependsOn: WorkshopVPC
+  DBSecurityGroupSelfRefIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      SourceSecurityGroupId: !Ref DBSecurityGroup
+      IpProtocol: '-1'
+      GroupId: !Ref DBSecurityGroup
+    DependsOn: DBSecurityGroup
+  GlueSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for Glue Dev Endpoint
+      SecurityGroupIngress:
+        - CidrIp: '0.0.0.0/0'
+          IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+      VpcId: !Ref WorkshopVPC
+      Tags:
+        - Key: Name
+          Value: 'glueworkshop-glue-sg'
+    DependsOn: WorkshopVPC
+  GlueSecurityGroupIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref GlueSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt GlueSecurityGroup.GroupId
+    DependsOn: GlueSecurityGroup
+  GlueVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Join 
+        - ''
+        - - com.amazonaws.
+          - !Ref 'AWS::Region'
+          - .glue
+      SubnetIds:
+        - !Ref WorkshopSubnet1
+        - !Ref WorkshopSubnet2
+      VpcId: !Ref WorkshopVPC
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref DBSecurityGroup 
+        - !Ref GlueSecurityGroup
+      PrivateDnsEnabled: true
+    DependsOn: [WorkshopVPC, WorkshopSubnet1, WorkshopSubnet2, DBSecurityGroup, GlueSecurityGroup]
+  S3Endpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: '*'
+            Resource: '*'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      RouteTableIds: [!Ref RouteTable]
+      VpcEndpointType: Gateway
+      VpcId: !Ref WorkshopVPC
+    DependsOn: [WorkshopVPC, RouteTable]
+  MySQLDB:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBInstanceIdentifier: glueworkshop
+      DBName: glueworkshop
+      DBInstanceClass: db.t3.medium
+      AllocatedStorage: '100'
+      AvailabilityZone: !GetAtt
+        - WorkshopSubnet1
+        - AvailabilityZone
+      DBSubnetGroupName: !Ref MyDBSubnetGroup
+      Engine: MySQL
+      EngineVersion: 5.7.33
+      MasterUsername: glueworkshop
+      MasterUserPassword: ImmersionsDay
+      MultiAZ: 'false'
+      PubliclyAccessible: 'false'
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+    DependsOn: [DBSecurityGroup, MyDBSubnetGroup, WorkshopSubnet1]
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'glueworkshop-${AWS::AccountId}-${AWS::Region}'
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: input/lab1/eventnotification/
+            Queue: !GetAtt Lab1EventQueue.Arn
+    DependsOn: Lab1EventQueue
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - s3:GetBucketAcl
+            Resource: !Sub arn:aws:s3:::${S3Bucket}
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub arn:aws:s3:::${S3Bucket}/cloudtrail/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+  Trail:    
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      TrailName: 'glueworkshop-trail'
+      IsLogging: True
+      S3BucketName: !Ref S3Bucket
+      S3KeyPrefix: cloudtrail
+      EventSelectors:
+        - DataResources:
+            - Type: AWS::S3::Object
+              Values: 
+              - !Sub arn:aws:s3:::${S3Bucket}/input/lab8/eventdriven/
+          IncludeManagementEvents: False
+          ReadWriteType: WriteOnly
+    DependsOn: 
+      - S3Bucket
+      - S3BucketPolicy
+  AWSGlueServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSGlueServiceRole-glueworkshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonKinesisFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSNSFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSQSFullAccess'
+  AWSGlueServiceSageMakerNotebookRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSGlueServiceSageMakerNotebookRole-glueworkshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceNotebookRole'
+        - 'arn:aws:iam::aws:policy/AmazonSageMakerFullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'   
+  AWSGlueDataBrewServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSGlueDataBrewServiceRole-glueworkshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: databrew.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueDataBrewServiceRole'
+  AWSEventBridgeInvokeGlueRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSEventBridgeInvokeRole-glueworkshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: EventBridgeInvokeGlue
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'glue:notifyEvent'
+                Resource: "*"
+        - PolicyName: EventBridgeInvokeStepFunction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 'states:StartExecution'
+                Resource: "*"
+  AWSStepFunctionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: AWSStepFunctionRole-glueworkshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonSNSFullAccess' 
+  Lab1EventQueue: 
+    Type: AWS::SQS::Queue
+    Properties: 
+      QueueName: 'glueworkshop-lab1-event-queue'
+  Lab1EventQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Id: glueworkshop-lab1-event-queue-policy
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3Permission
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - SQS:SendMessage
+            Resource: !GetAtt Lab1EventQueue.Arn
+      Queues:
+        - !Ref Lab1EventQueue
+    DependsOn: Lab1EventQueue
+  KinesisStream: 
+    Type: AWS::Kinesis::Stream 
+    Properties: 
+        Name: glueworkshop  
+        RetentionPeriodHours: 24 
+        ShardCount: 2
+  GlueCatalogDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: glueworkshop-cloudformation 
+        Description: Database create by Cloudformation for glue workshop
+  JsonStreamingTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueCatalogDatabase
+      TableInput:
+        Name: json-streaming-table
+        Description: Define schema for streaming json
+        TableType: EXTERNAL_TABLE
+        Parameters: { "classification": "json" }
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Columns:
+          - Name: "uuid"
+            Type: string
+          - Name: "country"
+            Type: string
+          - Name: "itemtype"
+            Type: string
+          - Name: "saleschannel"
+            Type: string  
+          - Name: "orderpriority"
+            Type: string
+          - Name: "orderdate"
+            Type: string
+          - Name: "region"
+            Type: string
+          - Name: "shipdate"
+            Type: string
+          - Name: "unitssold"
+            Type: string
+          - Name: "unitprice"
+            Type: string
+          - Name: "unitcost"
+            Type: string
+          - Name: "totalrevenue"
+            Type: string
+          - Name: "totalcost"
+            Type: string
+          - Name: "totalprofit"
+            Type: string              
+          Parameters: {"endpointUrl": !Sub "https://kinesis.${AWS::Region}.amazonaws.com", "streamName": "glueworkshop", "typeOfData": "kinesis"}
+          SerdeInfo:
+            Parameters: {"paths": "Country,ItemType,OrderDate,OrderPriority,Region,SalesChannel,ShipDate,TotalCost,TotalProfit,TotalRevenue,UnitCost,UnitPrice,UnitsSold,uuid"}
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+    DependsOn: [GlueCatalogDatabase, KinesisStream]
+  JsonStaticTable:
+    DependsOn: GlueCatalogDatabase
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueCatalogDatabase
+      TableInput:
+        Name: json-static-table
+        Description: Define schema for static json
+        TableType: EXTERNAL_TABLE
+        Parameters: { "classification": "json" }
+        StorageDescriptor:
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          Columns:
+          - Name: "uuid"
+            Type: string
+          - Name: "country"
+            Type: string
+          - Name: "itemtype"
+            Type: string
+          - Name: "saleschannel"
+            Type: string	
+          - Name: "orderpriority"
+            Type: string
+          - Name: "orderdate"
+            Type: string
+          - Name: "region"
+            Type: string
+          - Name: "shipdate"
+            Type: string
+          - Name: "unitssold"
+            Type: string
+          - Name: "unitprice"
+            Type: string
+          - Name: "unitcost"
+            Type: string
+          - Name: "totalrevenue"
+            Type: string
+          - Name: "totalcost"
+            Type: string
+          - Name: "totalprofit"
+            Type: string         
+          Location: !Sub 's3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/input/lab4/json/'
+          SerdeInfo:
+            Parameters: {"paths": "Country,ItemType,OrderDate,OrderPriority,Region,SalesChannel,ShipDate,TotalCost,TotalProfit,TotalRevenue,UnitCost,UnitPrice,UnitsSold,uuid"}
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+  Cloud9IDE:
+    Type: AWS::Cloud9::EnvironmentEC2
+    Properties: 
+      AutomaticStopTimeMinutes: 120
+      ConnectionType: CONNECT_SSH
+      Description: 'Cloud9 environment created for Glue workshop'
+      ImageId: amazonlinux-2-x86_64
+      InstanceType: t3.small
+      Name: glueworkshop
+      OwnerArn: !Sub 'arn:aws:sts::${AWS::AccountId}:assumed-role/TeamRole/MasterKey'
+  Cloud9IDE2:
+    Type: AWS::Cloud9::EnvironmentEC2
+    Properties: 
+      AutomaticStopTimeMinutes: 120
+      ConnectionType: CONNECT_SSH
+      Description: 'PLEASE USE THIS INSTANCE ONLY TO CONNECT Database'
+      ImageId: amazonlinux-2-x86_64
+      InstanceType: t3.small
+      Name: mysql_glueworkshop
+      OwnerArn: !Sub 'arn:aws:sts::${AWS::AccountId}:assumed-role/TeamRole/MasterKey'
+      SubnetId: !Ref WorkshopSubnet1
+  GlueDevEndpoint:
+    Type: 'AWS::Glue::DevEndpoint'
+    Properties: 
+      EndpointName: GlueSageMakerNotebook-glueworkshop
+      Arguments: 
+        {
+          "--enable-glue-datacatalog": "",
+          "GLUE_PYTHON_VERSION": "3"
+        }
+      GlueVersion: 1.0
+      NumberOfWorkers: 4
+      WorkerType: Standard
+      RoleArn: !GetAtt AWSGlueServiceRole.Arn
+      ExtraJarsS3Path: 's3://crawler-public/json/serde/json-serde.jar'
+      ExtraPythonLibsS3Path: !Sub 's3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/library/pycountry_convert.zip'
+    DependsOn: 
+      - AWSGlueServiceRole
+  GlueSagemakerNotebook:
+    Type: 'AWS::SageMaker::NotebookInstance'
+    Properties:
+      DirectInternetAccess: Enabled
+      LifecycleConfigName: !GetAtt GlueSagemakerLifecycleConfig.NotebookInstanceLifecycleConfigName
+      NotebookInstanceName: aws-glue-glueworkshop
+      InstanceType: ml.t3.medium
+      RoleArn: !GetAtt AWSGlueServiceSageMakerNotebookRole.Arn
+      Tags:
+        - Key: aws-glue-dev-endpoint
+          Value: !Ref GlueDevEndpoint
+    DependsOn: 
+      - GlueDevEndpoint
+      - AWSGlueServiceSageMakerNotebookRole
+  GlueSagemakerLifecycleConfig:
+    Type: "AWS::SageMaker::NotebookInstanceLifecycleConfig"
+    Properties:
+      NotebookInstanceLifecycleConfigName: glueworkshop-Glue-LifecycleConfig
+      OnStart:
+        - Content:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              set -ex
+              [ -e /home/ec2-user/glue_ready ] && exit 0
+              mkdir -p /home/ec2-user/glue
+              cd /home/ec2-user/glue
+              
+              # Write dev endpoint in a file which will be used by daemon scripts
+              glue_endpoint_file="/home/ec2-user/glue/glue_endpoint.txt"
+              if [ -f $glue_endpoint_file ] ; then
+                  rm $glue_endpoint_file
+              fi
+              echo "https://glue.${AWS::Region}.amazonaws.com" >> $glue_endpoint_file
+
+              aws s3 cp s3://aws-glue-jes-prod-${AWS::Region}-assets/sagemaker/assets/ . --recursive
+              bash "/home/ec2-user/glue/Miniconda2-4.5.12-Linux-x86_64.sh" -b -u -p "/home/ec2-user/glue/miniconda"
+              source "/home/ec2-user/glue/miniconda/bin/activate"
+              tar -xf autossh-1.4e.tgz
+              cd autossh-1.4e
+              ./configure
+              make
+              sudo make install
+              sudo cp /home/ec2-user/glue/autossh.conf /etc/init/
+              mkdir -p /home/ec2-user/.sparkmagic
+              cp /home/ec2-user/glue/config.json /home/ec2-user/.sparkmagic/config.json
+              mkdir -p /home/ec2-user/SageMaker/Glue\ Examples
+              mv /home/ec2-user/glue/notebook-samples/* /home/ec2-user/SageMaker/Glue\ Examples/
+
+              # ensure SageMaker notebook has permission for the dev endpoint
+              aws glue get-dev-endpoint --endpoint-name ${GlueDevEndpoint} --endpoint https://glue.${AWS::Region}.amazonaws.com
+
+              # Run daemons as cron jobs and use flock make sure that daemons are started only iff stopped
+              (crontab -l; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-v2-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-v2-dev-endpoint-daemon.sh 2>&1 | tee -a /var/log/sagemaker-lifecycle-config-v2-dev-endpoint-daemon.log") | crontab -
+              (crontab -l; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-reconnect-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-reconnect-dev-endpoint-daemon.sh 2>&1 | tee -a /var/log/sagemaker-lifecycle-config-reconnect-dev-endpoint-daemon.log") | crontab -
+
+              CONNECTION_CHECKER_FILE=/home/ec2-user/glue/dev_endpoint_connection_checker.py
+              if [ -f "$CONNECTION_CHECKER_FILE" ]; then
+                  # wait for async dev endpoint connection to come up
+                  echo "Checking DevEndpoint connection."
+                  python3 $CONNECTION_CHECKER_FILE
+              fi
+
+              source "/home/ec2-user/glue/miniconda/bin/deactivate"
+              rm -rf "/home/ec2-user/glue/Miniconda2-4.5.12-Linux-x86_64.sh"
+              sudo touch /home/ec2-user/glue_ready
+  Lab5GlueRdsConnection:
+    Type: 'AWS::Glue::Connection'
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionProperties:
+          Name: lab5-rds-connection
+          Type: JDBC
+          JDBC_CONNECTION_URL: !Join
+            - ''
+            - - 'jdbc:mysql://'
+              - !GetAtt
+                - MySQLDB
+                - Endpoint.Address
+              - ':'
+              - !GetAtt
+                - MySQLDB
+                - Endpoint.Port
+              - '/glueworkshop'
+          USERNAME: "glueworkshop"
+          PASSWORD: "ImmersionsDay"
+        ConnectionType: JDBC
+        Description: >-
+          MySQL connection to Sample DB
+        Name: 'lab5-rds-connection'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !GetAtt
+          - WorkshopSubnet1
+          - AvailabilityZone
+          SecurityGroupIdList:
+            - !Ref DBSecurityGroup
+          SubnetId: !Ref WorkshopSubnet1
+    DependsOn: [MySQLDB]
+  Lab5GlueCrawlerRdsTable:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: 'lab5-rds-crawler'
+      Role: !GetAtt AWSGlueServiceRole.Arn
+      Description: AWS Glue crawler to crawl RDS table
+      DatabaseName: !Ref GlueCatalogDatabase
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref Lab5GlueRdsConnection
+            Path: 'glueworkshop/%'
+      TablePrefix: 'lab5_rds_'
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+  Lab8MockJobDataProcess:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/script/lab8/covid-case-count-data-extract.py"
+      MaxRetries: 0
+      Name: lab8-covid-case-count-data-extract
+      GlueVersion: 3.0
+      Role: !Ref AWSGlueServiceRole
+  Lab8MockJobDataExtract:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/script/lab8/covid-case-count-data-process.py"
+      MaxRetries: 0
+      Name: lab8-covid-case-count-data-process
+      GlueVersion: 3.0
+      Role: !Ref AWSGlueServiceRole
+  Lab8MockJobVaccineExtract:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/script/lab8/vaccine-count-data-extract.py"
+      MaxRetries: 0
+      Name: lab8-vaccine-count-data-extract
+      GlueVersion: 3.0
+      Role: !Ref AWSGlueServiceRole
+  Lab8MockJobError:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/script/lab8/raise-error-job.py"
+      MaxRetries: 0
+      Name: lab8-raise-error
+      GlueVersion: 3.0
+      Role: !Ref AWSGlueServiceRole
+  Lab8MockJobVaccineProcess:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/script/lab8/vaccine-count-data-process.py"
+      MaxRetries: 0
+      Name: lab8-vaccine-count-data-process
+      GlueVersion: 3.0
+      Role: !Ref AWSGlueServiceRole
+  Lab8MockCaseCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: lab8-covid-case-count-processed-crawler
+      Role: !GetAtt AWSGlueServiceRole.Arn
+      DatabaseName: !Ref GlueCatalogDatabase
+      TablePrefix: lab8-case-processed-
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/input/lab1/csv/"
+  Lab8MockVaccineCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: lab8-vaccine-case-count-processed-crawler
+      Role: !GetAtt AWSGlueServiceRole.Arn
+      DatabaseName: !Ref GlueCatalogDatabase
+      TablePrefix: lab8-vaccine-processed-
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://ee-assets-prod-${AWS::Region}/modules/aa287fde7dd448ffac85ed7824e5c1f0/v3/input/lab1/csv/"
+  Lab8SNSTopicSuccess:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lab8-sns-success-notification
+  Lab8SNSTopicFailure:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: lab8-sns-failure-notification
+Outputs:
+  EndpointName:
+    Value: !Ref GlueDevEndpoint
+    Description: Endpoint created for Glue Workshop Lab.
+  MySQLJDBCConnectionString:
+    Description: JDBC connection string for MySQL database
+    Value: !Join
+      - ''
+      - - 'jdbc:mysql://'
+        - !GetAtt
+          - MySQLDB
+          - Endpoint.Address
+        - ':'
+        - !GetAtt
+          - MySQLDB
+          - Endpoint.Port
+        - '/glueworkshop'
+  MySQLEndpoint:
+    Description: RDS endpoint for MySQL database
+    Value: !GetAtt MySQLDB.Endpoint.Address
